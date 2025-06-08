@@ -1,0 +1,51 @@
+area_registry:
+  - id: string
+    name: string
+label_registry:
+  - label_id: string
+    name: string
+    icon: string|null
+    color: string|null
+    description: string|null
+    created_at: string
+    modified_at: string
+device_registry:
+  - id: string
+    identifiers: list of (string, string) tuples
+    name: string|null
+    name_by_user: string|null
+    manufacturer: string|null
+    model: string|null
+    model_id: string|null
+    hw_version: string|null
+    sw_version: string|null
+    serial_number: string|null
+    suggested_area: string|null
+    via_device: string|null
+entity_registry:
+  - entity_id: string
+    name: string|null
+    unique_id: string|null
+    device_id: string|null
+    area_id: string|null
+    disabled_by: string|null
+    labels: list of strings
+floor_registry:
+  - floor_id: string
+    name: string
+    level: number
+    icon: string|null
+    aliases: list of strings
+    created_at: string
+    modified_at: string
+state_object:
+  entity_id: string
+  state: string
+  last_changed: string
+  last_updated: string
+  last_reported: string
+  attributes: object
+  context:
+    id: string
+    user_id: string|null
+    parent_id: string|null
