@@ -4,7 +4,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use strum_macros::{AsRefStr, Display};
 
-use rmcp::{Error as McpError, RoleServer, ServerHandler, model::*, service::RequestContext};
+use rmcp::{
+    Error as McpError, RoleServer, ServerHandler, ServiceExt, model::*, service::RequestContext,
+};
 use schemars::{JsonSchema, SchemaGenerator};
 use serde::{Deserialize, Serialize};
 // use rmcp::handler::server::tool::schema_for_type; // Not using rmcp's schemars anymore
@@ -19,17 +21,15 @@ fn schema_for_type<T: JsonSchema>() -> serde_json::Map<String, serde_json::Value
         _ => panic!("unexpected schema value"),
     }
 }
-use clap::{Parser, Subcommand};
+use clap::Parser;
 use futures_util::{SinkExt, StreamExt};
 use fuzzy_matcher::FuzzyMatcher;
 use reqwest::Client;
-use rmcp::transport::sse_server::{SseServer, SseServerConfig};
+use rmcp::transport::stdio;
 use serde_json::json;
-use std::net::SocketAddr;
 use tokio::net::TcpStream;
 use tokio::sync::{Mutex, mpsc, oneshot};
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async, tungstenite::Message};
-use tokio_util::sync::CancellationToken;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 // =============================================================================
@@ -4684,98 +4684,44 @@ impl ServerHandler for HomeAssistantService {
 #[command(about = "Home Assistant MCP Configuration Server")]
 #[command(version = "0.1.0")]
 struct Cli {
-    #[command(subcommand)]
-    command: Commands,
-}
+    /// Home Assistant URL (e.g., http://localhost:8123)
+    #[arg(long = "url", env = "HASS_URL")]
+    url: String,
 
-#[derive(Subcommand)]
-enum Commands {
-    /// Start the MCP server
-    Serve {
-        /// Home Assistant URL (e.g., http://localhost:8123)
-        ha_url: String,
-
-        /// Home Assistant long-lived access token
-        #[arg(long = "api-key")]
-        api_key: String,
-
-        /// Port to bind the server to
-        #[arg(short, long, default_value = "4000")]
-        port: u16,
-
-        /// Bind address
-        #[arg(long, default_value = "127.0.0.1")]
-        bind: String,
-    },
+    /// Home Assistant long-lived access token
+    #[arg(long = "api-key", env = "HASS_API_KEY")]
+    api_key: String,
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::registry()
         .with(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "debug".into()),
         )
-        .with(tracing_subscriber::fmt::layer())
+        .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
         .init();
 
     let cli = Cli::parse();
 
-    match cli.command {
-        Commands::Serve {
-            ha_url,
-            api_key,
-            port,
-            bind,
-        } => {
-            let schemas = serde_yaml::from_str(include_str!("../schemas.yaml"))?;
-            let config = HomeAssistantConfig::new(ha_url.clone(), api_key);
-            let service = HomeAssistantService::new(schemas, config).await?;
+    let schemas = serde_yaml::from_str(include_str!("../schemas.yaml"))?;
+    let config = HomeAssistantConfig::new(cli.url.clone(), cli.api_key);
+    let service = HomeAssistantService::new(schemas, config).await?;
 
-            let bind_address: SocketAddr = format!("{}:{}", bind, port).parse()?;
+    tracing::info!("🚀 Home Assistant MCP Server starting");
+    tracing::info!("📡 Home Assistant URL: {}", cli.url);
 
-            let config = SseServerConfig {
-                bind: bind_address,
-                sse_path: "/sse".into(),
-                post_path: "/message".into(),
-                ct: CancellationToken::new(),
-                sse_keep_alive: None,
-            };
-
-            let (sse_server, router) = SseServer::new(config);
-
-            println!("🚀 Home Assistant MCP Server starting on {}", bind_address);
-            println!("📡 Home Assistant URL: {}", ha_url);
-            println!("🔌 Endpoints:");
-            println!("   - SSE: http://{}/sse", bind_address);
-            println!("   - Message: http://{}/message", bind_address);
-            println!("\n💡 Use Ctrl+C to stop the server");
-
-            if tracing::enabled!(tracing::Level::DEBUG) {
-                println!("🐛 Debug mode enabled - JSON schemas will be logged on startup");
-            }
-
-            let listener = tokio::net::TcpListener::bind(sse_server.config.bind).await?;
-
-            let ct = sse_server.config.ct.child_token();
-
-            let server = axum::serve(listener, router).with_graceful_shutdown(async move {
-                ct.cancelled().await;
-                println!("SSE server cancelled");
-            });
-
-            tokio::spawn(async move {
-                if let Err(e) = server.await {
-                    tracing::error!(error = %e, "sse server shutdown with error");
-                }
-            });
-
-            let ct = sse_server.with_service(move || service.clone());
-
-            tokio::signal::ctrl_c().await?;
-            println!("Shutting down server");
-            ct.cancel();
-
-            Ok(())
-        }
+    if tracing::enabled!(tracing::Level::DEBUG) {
+        tracing::debug!("🐛 Debug mode enabled - JSON schemas will be logged on startup");
     }
+
+    let server_service = service
+        .serve(stdio())
+        .await
+        .inspect_err(|error| tracing::error!(%error, "Error serving"))?;
+
+    server_service.waiting().await?;
+
+    Ok(())
 }
