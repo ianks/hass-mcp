@@ -38,6 +38,7 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use url::Url;
 
+#[derive(Clone)]
 pub struct HomeAssistantConfig {
     pub url: String,
     pub token: String,
@@ -719,7 +720,7 @@ impl WebSocketManager {
 
     async fn run(
         &mut self,
-        mut command_receiver: mpsc::Receiver<WebSocketCommand>,
+        command_receiver: &mut mpsc::Receiver<WebSocketCommand>,
     ) -> Result<(), McpError> {
         loop {
             tokio::select! {
@@ -797,19 +798,50 @@ pub struct HomeAssistantClient {
 }
 
 impl HomeAssistantClient {
+    async fn websocket_manager_task(
+        config: HomeAssistantConfig,
+        mut command_receiver: mpsc::Receiver<WebSocketCommand>,
+    ) {
+        let mut reconnect_delay = 1;
+        loop {
+            let mut ws_manager = match WebSocketManager::new(&config).await {
+                Ok(manager) => {
+                    tracing::info!("WebSocket connection established");
+                    reconnect_delay = 1; // Reset delay on successful connection
+                    manager
+                }
+                Err(e) => {
+                    tracing::error!(
+                        "Failed to create WebSocket manager: {}, retrying in {}s",
+                        e,
+                        reconnect_delay
+                    );
+                    tokio::time::sleep(tokio::time::Duration::from_secs(reconnect_delay)).await;
+                    reconnect_delay = std::cmp::min(reconnect_delay * 2, 60); // Exponential backoff, max 60s
+                    continue;
+                }
+            };
+
+            if let Err(e) = ws_manager.run(&mut command_receiver).await {
+                tracing::error!(
+                    "WebSocket manager error: {}, reconnecting in {}s...",
+                    e,
+                    reconnect_delay
+                );
+                tokio::time::sleep(tokio::time::Duration::from_secs(reconnect_delay)).await;
+                reconnect_delay = std::cmp::min(reconnect_delay * 2, 60);
+            }
+        }
+    }
+
     pub async fn new(config: HomeAssistantConfig) -> Result<Self, McpError> {
         let (command_sender, command_receiver) = mpsc::channel(100);
         let command_id_counter = Arc::new(AtomicU64::new(1));
 
-        // Create the WebSocket manager
-        let mut ws_manager = WebSocketManager::new(&config).await?;
-
-        // Spawn the background task to handle WebSocket communication
+        // Spawn the background task to handle WebSocket communication with reconnection
+        let config_clone = config.clone();
         tokio::spawn(async move {
-            if let Err(e) = ws_manager.run(command_receiver).await {
-                tracing::error!("WebSocket manager error: {}", e);
-                // TODO: Add reconnection logic here
-            }
+            Self::websocket_manager_task(config_clone, command_receiver).await;
         });
 
         Ok(Self {
