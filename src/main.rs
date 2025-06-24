@@ -271,19 +271,6 @@ pub struct DeviceLabelAllEntitiesArgs {
 }
 
 // Discovery and analysis argument structs
-#[derive(Debug, Serialize, Deserialize, JsonSchema)]
-pub struct FindOrphanedEntitiesArgs {
-    /// Maximum number of orphaned entities to return (default: 50)
-    #[serde(default)]
-    pub limit: Option<usize>,
-}
-
-#[derive(Debug, Serialize, Deserialize, JsonSchema)]
-pub struct RecommendLabelsArgs {
-    /// Maximum number of recommendations to return (default: 50)
-    #[serde(default)]
-    pub limit: Option<usize>,
-}
 
 // Label creation argument structs
 #[derive(Debug, Serialize, Deserialize, JsonSchema, Clone)]
@@ -618,17 +605,6 @@ pub struct DiscoverToolsArgs {
     pub include_descriptions: bool,
 }
 
-#[derive(Debug, Serialize, Deserialize, JsonSchema)]
-pub struct ValidateEntityIdArgs {
-    /// Entity ID to validate
-    pub entity_id: String,
-}
-
-#[derive(Debug, Serialize, Deserialize, JsonSchema)]
-pub struct ValidateDeviceIdArgs {
-    /// Device ID to validate
-    pub device_id: String,
-}
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct GetEntitiesForDeviceArgs {
@@ -1382,14 +1358,6 @@ impl HomeAssistantService {
             (
                 "DeviceLabelAllEntitiesArgs",
                 schema_for_type::<DeviceLabelAllEntitiesArgs>(),
-            ),
-            (
-                "FindOrphanedEntitiesArgs",
-                schema_for_type::<FindOrphanedEntitiesArgs>(),
-            ),
-            (
-                "RecommendLabelsArgs",
-                schema_for_type::<RecommendLabelsArgs>(),
             ),
             ("CreateLabelArgs", schema_for_type::<CreateLabelArgs>()),
             (
@@ -2899,61 +2867,7 @@ impl HomeAssistantService {
         Ok(CallToolResult::success(vec![Content::text(output)]))
     }
 
-    async fn validate_entity_id(&self, entity_id: String) -> Result<CallToolResult, McpError> {
-        // Check if it looks like a valid entity ID format
-        if !entity_id.contains('.') {
-            return Ok(CallToolResult::success(vec![Content::text(format!(
-                "❌ Invalid entity ID format: '{}'\n\nEntity IDs should be in format 'domain.name' (e.g., 'sensor.temperature', 'light.kitchen')\n\nDid you mean to use validate_device_id() instead?",
-                entity_id
-            ))]));
-        }
 
-        let all_entities = self.registry_ops.list("entity_registry").await?;
-        let empty_vec = vec![];
-
-        if let Some(entity) = all_entities
-            .as_array()
-            .unwrap_or(&empty_vec)
-            .iter()
-            .find(|e| e.get("entity_id").and_then(|v| v.as_str()) == Some(&entity_id))
-        {
-            let pretty_json = serde_json::to_string_pretty(entity)
-                .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-            Ok(CallToolResult::success(vec![Content::text(format!(
-                "✅ Entity '{}' exists\n\n```json\n{}\n```",
-                entity_id, pretty_json
-            ))]))
-        } else {
-            Ok(CallToolResult::success(vec![Content::text(format!(
-                "❌ Entity '{}' not found in entity registry\n\nUse search_entities() to find similar entities.",
-                entity_id
-            ))]))
-        }
-    }
-
-    async fn validate_device_id(&self, device_id: String) -> Result<CallToolResult, McpError> {
-        let all_devices = self.registry_ops.list("device_registry").await?;
-        let empty_vec = vec![];
-
-        if let Some(device) = all_devices
-            .as_array()
-            .unwrap_or(&empty_vec)
-            .iter()
-            .find(|d| d.get("id").and_then(|v| v.as_str()) == Some(&device_id))
-        {
-            let pretty_json = serde_json::to_string_pretty(device)
-                .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-            Ok(CallToolResult::success(vec![Content::text(format!(
-                "✅ Device '{}' exists\n\n```json\n{}\n```",
-                device_id, pretty_json
-            ))]))
-        } else {
-            Ok(CallToolResult::success(vec![Content::text(format!(
-                "❌ Device '{}' not found in device registry\n\nUse list_devices() to see available devices.",
-                device_id
-            ))]))
-        }
-    }
 
     async fn get_entities_for_device(&self, device_id: String) -> Result<CallToolResult, McpError> {
         let all_entities = self.registry_ops.list("entity_registry").await?;
@@ -3227,439 +3141,11 @@ impl HomeAssistantService {
         Ok(CallToolResult::success(vec![Content::text(analysis)]))
     }
 
-    async fn find_orphaned_entities(
-        &self,
-        limit: Option<usize>,
-    ) -> Result<CallToolResult, McpError> {
-        let all_entities = self.registry_ops.list("entity_registry").await?;
-        let empty_vec = vec![];
-        let max_results = limit.unwrap_or(100);
 
-        let orphaned_entities: Vec<&serde_json::Value> = all_entities
-            .as_array()
-            .unwrap_or(&empty_vec)
-            .iter()
-            .filter(|entity| {
-                entity.get("area_id").is_none()
-                    || entity
-                        .get("area_id")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .is_empty()
-            })
-            .take(max_results)
-            .collect();
 
-        let summary = format!(
-            "# Orphaned Entities (Not Assigned to Areas)\n\n\
-            Found {} orphaned entities (showing first {})\n\n\
-            💡 **Tip**: Use `entity_assign_area()` to organize these entities.\n\n\
-            ```json\n{}\n```",
-            orphaned_entities.len(),
-            max_results.min(orphaned_entities.len()),
-            serde_json::to_string_pretty(&orphaned_entities)
-                .map_err(|e| McpError::internal_error(e.to_string(), None))?
-        );
 
-        Ok(CallToolResult::success(vec![Content::text(summary)]))
-    }
 
-    async fn recommend_labels(&self, limit: Option<usize>) -> Result<CallToolResult, McpError> {
-        let all_entities = self.registry_ops.list("entity_registry").await?;
-        let all_devices = self.registry_ops.list("device_registry").await?;
-        let all_labels = self.registry_ops.list("label_registry").await?;
-        let empty_vec = vec![];
-        let max_results = limit.unwrap_or(50);
 
-        // Find entities without labels
-        let unlabeled_entities: Vec<&serde_json::Value> = all_entities
-            .as_array()
-            .unwrap_or(&empty_vec)
-            .iter()
-            .filter(|entity| {
-                entity
-                    .get("labels")
-                    .and_then(|labels| labels.as_array())
-                    .map(|arr| arr.is_empty())
-                    .unwrap_or(true)
-            })
-            .take(max_results)
-            .collect();
-
-        // Get existing labels for suggestions
-        let existing_labels: Vec<String> = all_labels
-            .as_array()
-            .unwrap_or(&empty_vec)
-            .iter()
-            .filter_map(|label| {
-                label
-                    .get("label_id")
-                    .or_else(|| label.get("name"))
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.into())
-            })
-            .collect();
-
-        // Create device lookup for entity grouping
-        let devices_map: std::collections::HashMap<String, &serde_json::Value> = all_devices
-            .as_array()
-            .unwrap_or(&empty_vec)
-            .iter()
-            .filter_map(|device| {
-                device
-                    .get("id")
-                    .and_then(|id| id.as_str())
-                    .map(|id| (id.into(), device))
-            })
-            .collect();
-
-        // Analyze domains and group by devices
-        type DomainAnalysis =
-            std::collections::HashMap<String, Vec<(String, Option<String>, Option<String>)>>;
-        let mut domain_analysis: DomainAnalysis = std::collections::HashMap::new();
-
-        for entity in &unlabeled_entities {
-            if let Some(entity_id) = entity.get("entity_id").and_then(|v| v.as_str()) {
-                let domain: String = entity_id.split('.').next().unwrap_or("unknown").into();
-
-                // Get device info if available
-                let device_id = entity.get("device_id").and_then(|v| v.as_str());
-                let device_name = device_id
-                    .and_then(|id| devices_map.get(id))
-                    .and_then(|device| {
-                        device
-                            .get("name_by_user")
-                            .or_else(|| device.get("name"))
-                            .and_then(|v| v.as_str())
-                    });
-
-                domain_analysis.entry(domain.clone()).or_default().push((
-                    entity_id.into(),
-                    device_id.map(|s| s.into()),
-                    device_name.map(|s| s.into()),
-                ));
-            }
-        }
-
-        let mut output = format!(
-            "# Labeling Recommendations\n\n\
-            Found {} unlabeled entities (showing first {})\n\n\
-            ## Suggested Labels by Domain\n\n",
-            unlabeled_entities.len(),
-            max_results.min(unlabeled_entities.len())
-        );
-
-        // Generate domain-specific recommendations with device context
-        for (domain, entity_data) in &domain_analysis {
-            let suggested_labels = self.suggest_labels_for_domain(domain);
-            let entity_ids: Vec<String> = entity_data.iter().map(|(id, _, _)| id.clone()).collect();
-
-            output.push_str(&format!(
-                "### {} Domain ({} entities)\n\
-                **Suggested Labels**: {}\n\n",
-                domain,
-                entity_data.len(),
-                suggested_labels.join(", ")
-            ));
-
-            // Group by device for better organization
-            type DeviceGroups<'a> = std::collections::HashMap<
-                String,
-                Vec<&'a (String, Option<String>, Option<String>)>,
-            >;
-            let mut device_groups: DeviceGroups = std::collections::HashMap::new();
-
-            for entity_info in entity_data {
-                let device_key = match (&entity_info.1, &entity_info.2) {
-                    (Some(device_id), Some(device_name)) => {
-                        format!("{} ({})", device_name, &device_id[..8])
-                    }
-                    (Some(device_id), None) => format!("Device {}", &device_id[..8]),
-                    _ => "No Device".into(),
-                };
-                device_groups
-                    .entry(device_key)
-                    .or_default()
-                    .push(entity_info);
-            }
-
-            output.push_str("**Entities by Device**:\n");
-            for (device_key, entities) in &device_groups {
-                output.push_str(&format!("- **{}**:\n", device_key));
-                for (entity_id, device_id, _) in entities {
-                    output.push_str(&format!("  - `{}` ", entity_id));
-                    if let Some(dev_id) = device_id {
-                        output.push_str(&format!("(device: `{}`)", dev_id));
-                    }
-                    output.push('\n');
-                }
-            }
-
-            output.push_str(&format!(
-                "\n**Quick Commands**:\n{}\n\n",
-                self.generate_labeling_commands(&entity_ids, &suggested_labels)
-            ));
-        }
-
-        // Add device-specific recommendations
-        output.push_str(
-            &self
-                .generate_device_labeling_suggestions(&devices_map, &all_entities)
-                .await?,
-        );
-
-        // Add existing labels section
-        if !existing_labels.is_empty() {
-            output.push_str(&format!(
-                "## Existing Labels\n\
-                You can also use these existing labels:\n{}\n\n",
-                existing_labels
-                    .iter()
-                    .map(|l| format!("- `{}`", l))
-                    .collect::<Vec<_>>()
-                    .join("\n")
-            ));
-        }
-
-        output.push_str(
-            "## Usage Examples\n\
-            ```\n\
-            # Create and assign a new label to entities from same device\n\
-            create_and_assign_label(name=\"security\", entity_ids=[\"binary_sensor.door\", \"binary_sensor.motion\"])\n\n\
-            # Add existing label to entity\n\
-            add_labels_to_entity(entity_id=\"light.kitchen\", labels=[\"lighting\"])\n\n\
-            # Label ALL entities from a specific device (this is what you want for \"device labeling\"!)\n\
-            label_device(device_id=\"abc123\", labels=[\"security\"])\n\n\
-            # Create new label and apply to entire device\n\
-            create_and_label_device(label_name=\"kitchen_devices\", device_id=\"abc123\")\n\
-            ```\n\n\
-            💡 **Note**: In Home Assistant, labels can only be applied to entities, not devices directly. \
-            The `label_device()` and `create_and_label_device()` tools work by applying labels to ALL entities \
-            that belong to the specified device.\n"
-        );
-
-        Ok(CallToolResult::success(vec![Content::text(output)]))
-    }
-
-    /// Suggest appropriate labels for a domain
-    fn suggest_labels_for_domain(&self, domain: &str) -> Vec<String> {
-        match domain {
-            "light" => vec!["lighting".into(), "ambiance".into()],
-            "sensor" => vec!["monitoring".into(), "data".into(), "environmental".into()],
-            "binary_sensor" => vec!["security".into(), "monitoring".into(), "safety".into()],
-            "switch" => vec!["control".into(), "automation".into()],
-            "climate" => vec!["hvac".into(), "comfort".into(), "energy".into()],
-            "cover" => vec!["window_treatment".into(), "privacy".into()],
-            "lock" => vec!["security".into(), "access".into()],
-            "camera" => vec!["security".into(), "surveillance".into()],
-            "media_player" => vec!["entertainment".into(), "audio_video".into()],
-            "alarm_control_panel" => vec!["security".into(), "alarm".into()],
-            "device_tracker" => vec!["presence".into(), "location".into()],
-            "vacuum" => vec!["cleaning".into(), "automation".into()],
-            "fan" => vec!["comfort".into(), "climate".into()],
-            "water_heater" => vec!["energy".into(), "utilities".into()],
-            "person" => vec!["presence".into(), "family".into()],
-            _ => vec!["uncategorized".into()],
-        }
-    }
-
-    /// Generate ready-to-use labeling commands
-    fn generate_labeling_commands(
-        &self,
-        entity_ids: &[String],
-        suggested_labels: &[String],
-    ) -> String {
-        if entity_ids.is_empty() || suggested_labels.is_empty() {
-            return "No commands to generate".into();
-        }
-
-        let first_label = &suggested_labels[0];
-        let first_few_entities: Vec<String> = entity_ids.iter().take(3).cloned().collect();
-
-        format!(
-            "```\n\
-            # Create '{}' label and assign to first few entities:\n\
-            create_and_assign_label(name=\"{}\", entity_ids={:?})\n\n\
-            # Or assign existing label to individual entities:\n\
-            {}\n\
-            ```",
-            first_label,
-            first_label,
-            first_few_entities,
-            entity_ids
-                .iter()
-                .take(3)
-                .map(|id| format!(
-                    "add_labels_to_entity(entity_id=\"{}\", labels=[\"{}\"])",
-                    id, first_label
-                ))
-                .collect::<Vec<_>>()
-                .join("\n")
-        )
-    }
-
-    /// Generate device-specific labeling suggestions
-    async fn generate_device_labeling_suggestions(
-        &self,
-        devices_map: &std::collections::HashMap<String, &serde_json::Value>,
-        all_entities: &serde_json::Value,
-    ) -> Result<String, McpError> {
-        let empty_vec = vec![];
-        let entities_array = all_entities.as_array().unwrap_or(&empty_vec);
-
-        let mut output = String::from("## Device-Based Labeling Suggestions\n\n");
-
-        // Find devices with multiple unlabeled entities
-        let mut device_entity_count: std::collections::HashMap<String, Vec<String>> =
-            std::collections::HashMap::new();
-
-        for entity in entities_array {
-            if let Some(device_id) = entity.get("device_id").and_then(|v| v.as_str()) {
-                if let Some(entity_id) = entity.get("entity_id").and_then(|v| v.as_str()) {
-                    let is_unlabeled = entity
-                        .get("labels")
-                        .and_then(|labels| labels.as_array())
-                        .map(|arr| arr.is_empty())
-                        .unwrap_or(true);
-
-                    if is_unlabeled {
-                        device_entity_count
-                            .entry(device_id.into())
-                            .or_default()
-                            .push(entity_id.into());
-                    }
-                }
-            }
-        }
-
-        // Filter devices with 2+ unlabeled entities
-        let multi_entity_devices: Vec<_> = device_entity_count
-            .iter()
-            .filter(|(_, entities)| entities.len() >= 2)
-            .take(10) // Limit to prevent output bloat
-            .collect();
-
-        if !multi_entity_devices.is_empty() {
-            output.push_str("**Devices with Multiple Unlabeled Entities** (consider labeling all entities from same device):\n\n");
-
-            for (device_id, entity_ids) in multi_entity_devices {
-                let device_info = devices_map.get(device_id);
-                let device_name = device_info
-                    .and_then(|device| {
-                        device
-                            .get("name_by_user")
-                            .or_else(|| device.get("name"))
-                            .and_then(|v| v.as_str())
-                    })
-                    .unwrap_or("Unknown Device");
-
-                let manufacturer = device_info
-                    .and_then(|device| device.get("manufacturer").and_then(|v| v.as_str()))
-                    .unwrap_or("Unknown");
-
-                // Suggest labels based on device characteristics
-                let suggested_labels =
-                    self.suggest_labels_for_device(device_info.copied(), entity_ids);
-
-                output.push_str(&format!(
-                    "### {} ({}) - {} entities\n\
-                    - **Device ID**: `{}`\n\
-                    - **Manufacturer**: {}\n\
-                    - **Suggested Labels**: {}\n\
-                    - **Entity IDs**: {}\n\n\
-                    **Command**:\n\
-                    ```\n\
-                    create_and_assign_label(name=\"{}\", entity_ids={:?})\n\
-                    ```\n\n",
-                    device_name,
-                    &device_id[..8],
-                    entity_ids.len(),
-                    device_id,
-                    manufacturer,
-                    suggested_labels.join(", "),
-                    entity_ids
-                        .iter()
-                        .map(|id| format!("`{}`", id))
-                        .collect::<Vec<_>>()
-                        .join(", "),
-                    suggested_labels.first().unwrap_or(&"device_group".into()),
-                    entity_ids.iter().take(5).cloned().collect::<Vec<_>>()
-                ));
-            }
-        } else {
-            output.push_str(
-                "✅ Most devices have well-distributed entities or are already labeled.\n\n",
-            );
-        }
-
-        Ok(output)
-    }
-
-    /// Suggest labels for a specific device based on its characteristics
-    fn suggest_labels_for_device(
-        &self,
-        device_info: Option<&serde_json::Value>,
-        entity_ids: &[String],
-    ) -> Vec<String> {
-        let mut suggestions = Vec::new();
-
-        // Analyze device characteristics
-        if let Some(device) = device_info {
-            // Check manufacturer for specific suggestions
-            if let Some(manufacturer) = device.get("manufacturer").and_then(|v| v.as_str()) {
-                match manufacturer.to_lowercase().as_str() {
-                    "philips" => suggestions.push("lighting".into()),
-                    "nest" | "ecobee" => suggestions.push("climate".into()),
-                    "ring" | "arlo" => suggestions.push("security".into()),
-                    "sonos" | "bose" => suggestions.push("audio".into()),
-                    "tesla" => suggestions.push("automotive".into()),
-                    _ => {}
-                }
-            }
-
-            // Check device name for hints
-            if let Some(name) = device
-                .get("name_by_user")
-                .or_else(|| device.get("name"))
-                .and_then(|v| v.as_str())
-            {
-                let name_lower = name.to_lowercase();
-                if name_lower.contains("light") || name_lower.contains("lamp") {
-                    suggestions.push("lighting".into());
-                } else if name_lower.contains("lock") || name_lower.contains("door") {
-                    suggestions.push("security".into());
-                } else if name_lower.contains("sensor") {
-                    suggestions.push("monitoring".into());
-                } else if name_lower.contains("climate") || name_lower.contains("thermostat") {
-                    suggestions.push("climate".into());
-                }
-            }
-        }
-
-        // Analyze entity patterns
-        let has_light = entity_ids.iter().any(|id| id.starts_with("light."));
-        let has_sensor = entity_ids.iter().any(|id| id.starts_with("sensor."));
-        let has_binary_sensor = entity_ids.iter().any(|id| id.starts_with("binary_sensor."));
-        let has_switch = entity_ids.iter().any(|id| id.starts_with("switch."));
-
-        if has_light && !suggestions.contains(&"lighting".into()) {
-            suggestions.push("lighting".into());
-        }
-        if (has_sensor || has_binary_sensor) && !suggestions.contains(&"monitoring".into()) {
-            suggestions.push("monitoring".into());
-        }
-        if has_switch && !suggestions.contains(&"control".into()) {
-            suggestions.push("control".into());
-        }
-
-        // Default suggestions if none found
-        if suggestions.is_empty() {
-            suggestions.push("device_group".into());
-            suggestions.push("uncategorized".into());
-        }
-
-        suggestions
-    }
 
     /// Generate configuration recommendations
     fn generate_recommendations(
@@ -4244,18 +3730,6 @@ impl ServerHandler for HomeAssistantService {
                 annotations: None,
             },
             Tool {
-                name: "validate_entity_id".into(),
-                description: Some("Validate that an entity ID exists and get its information.".into()),
-                input_schema: Arc::new(schema_for_type::<ValidateEntityIdArgs>()),
-                annotations: None,
-            },
-            Tool {
-                name: "validate_device_id".into(),
-                description: Some("Validate that a device ID exists and get its information.".into()),
-                input_schema: Arc::new(schema_for_type::<ValidateDeviceIdArgs>()),
-                annotations: None,
-            },
-            Tool {
                 name: "get_entities_for_device".into(),
                 description: Some("Get all entities associated with a specific device.".into()),
                 input_schema: Arc::new(schema_for_type::<GetEntitiesForDeviceArgs>()),
@@ -4271,18 +3745,6 @@ impl ServerHandler for HomeAssistantService {
                 name: "analyze_configuration".into(),
                 description: Some("Analyze the Home Assistant configuration and provide recommendations.".into()),
                 input_schema: Arc::new(schema_for_type::<AnalyzeConfigurationArgs>()),
-                annotations: None,
-            },
-            Tool {
-                name: "find_orphaned_entities".into(),
-                description: Some("Find entities that are not assigned to areas or devices.".into()),
-                input_schema: Arc::new(schema_for_type::<FindOrphanedEntitiesArgs>()),
-                annotations: None,
-            },
-            Tool {
-                name: "recommend_labels".into(),
-                description: Some("Generate label recommendations for entities based on their domains and patterns.".into()),
-                input_schema: Arc::new(schema_for_type::<RecommendLabelsArgs>()),
                 annotations: None,
             },
         ];
@@ -4620,22 +4082,6 @@ impl ServerHandler for HomeAssistantService {
                     ))?;
                 self.discover_tools().await
             }
-            "validate_entity_id" => {
-                let args: ValidateEntityIdArgs = serde_json::from_value(serde_json::Value::Object(arguments))
-                    .map_err(|e| McpError::invalid_params(
-                        format!("validate_entity_id: Invalid arguments - {}. Expected: {{\"entity_id\": \"string\"}}", e), 
-                        None
-                    ))?;
-                self.validate_entity_id(args.entity_id).await
-            }
-            "validate_device_id" => {
-                let args: ValidateDeviceIdArgs = serde_json::from_value(serde_json::Value::Object(arguments))
-                    .map_err(|e| McpError::invalid_params(
-                        format!("validate_device_id: Invalid arguments - {}. Expected: {{\"device_id\": \"string\"}}", e), 
-                        None
-                    ))?;
-                self.validate_device_id(args.device_id).await
-            }
             "get_entities_for_device" => {
                 let args: GetEntitiesForDeviceArgs = serde_json::from_value(serde_json::Value::Object(arguments))
                     .map_err(|e| McpError::invalid_params(
@@ -4659,22 +4105,6 @@ impl ServerHandler for HomeAssistantService {
                         None
                     ))?;
                 self.analyze_configuration().await
-            }
-            "find_orphaned_entities" => {
-                let args: FindOrphanedEntitiesArgs = serde_json::from_value(serde_json::Value::Object(arguments))
-                    .map_err(|e| McpError::invalid_params(
-                        format!("find_orphaned_entities: Invalid arguments - {}. Expected: {{\"limit\": number (optional)}}", e), 
-                        None
-                    ))?;
-                self.find_orphaned_entities(args.limit).await
-            }
-            "recommend_labels" => {
-                let args: RecommendLabelsArgs = serde_json::from_value(serde_json::Value::Object(arguments))
-                    .map_err(|e| McpError::invalid_params(
-                        format!("recommend_labels: Invalid arguments - {}. Expected: {{\"limit\": number (optional)}}", e), 
-                        None
-                    ))?;
-                self.recommend_labels(args.limit).await
             }
             unknown_tool => {
                 let available_tools = vec![
